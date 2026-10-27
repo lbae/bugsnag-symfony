@@ -20,6 +20,7 @@ use Symfony\Component\HttpKernel\HttpKernelInterface;
 use Symfony\Component\HttpKernel\KernelEvents;
 use Symfony\Component\Messenger\Event\WorkerMessageFailedEvent;
 use Symfony\Component\Messenger\Event\WorkerMessageHandledEvent;
+use Symfony\Component\Messenger\Event\WorkerMessageReceivedEvent;
 
 class BugsnagListener implements EventSubscriberInterface
 {
@@ -144,6 +145,22 @@ class BugsnagListener implements EventSubscriberInterface
             $meta['name'] = $event->getCommand()->getName();
         }
         $this->sendNotify($event->getError(), ['command' => $meta]);
+    }
+
+    /**
+     * Clear any breadcrumbs left before a message is handled.
+     *
+     * Workers are (generally) long running processes that handle many messages
+     * using the same client, so breadcrumbs from a previous message would
+     * otherwise be attached to reports for the current message.
+     *
+     * @param WorkerMessageReceivedEvent $event
+     *
+     * @return void
+     */
+    public function onWorkerMessageReceived(WorkerMessageReceivedEvent $event)
+    {
+        $this->client->clearBreadcrumbs();
     }
 
     /**
@@ -280,6 +297,12 @@ class BugsnagListener implements EventSubscriberInterface
             } else {
                 $listeners[ConsoleEvents::EXCEPTION] = ['onConsoleException', 128];
             }
+        }
+
+        if (class_exists(WorkerMessageReceivedEvent::class)) {
+            // This should run before any other listeners so that breadcrumbs
+            // they leave aren't cleared
+            $listeners[WorkerMessageReceivedEvent::class] = ['onWorkerMessageReceived', 256];
         }
 
         if (class_exists(WorkerMessageFailedEvent::class)) {

@@ -23,10 +23,12 @@ use Symfony\Component\Console\Input\StringInput;
 use Symfony\Component\Console\Output\NullOutput;
 use Symfony\Component\Debug\Exception\OutOfMemoryException as OutOfMemorySymfony2Or3;
 use Symfony\Component\ErrorHandler\Error\OutOfMemoryError as OutOfMemorySymfony4Plus;
+use Symfony\Component\EventDispatcher\EventDispatcher;
 use Symfony\Component\HttpKernel\Event\GetResponseForExceptionEvent;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\Event\WorkerMessageFailedEvent;
 use Symfony\Component\Messenger\Event\WorkerMessageHandledEvent;
+use Symfony\Component\Messenger\Event\WorkerMessageReceivedEvent;
 
 class ReportStub
 {
@@ -324,5 +326,63 @@ class BugsnagListenerTest extends TestCase
         $event = new WorkerMessageHandledEvent($envelope, 'name');
 
         $listener->onWorkerMessageHandled($event);
+    }
+
+    public function testItShouldClearBreadcrumbsWhenAWorkerMessageReceivedEventFires()
+    {
+        if (!class_exists(WorkerMessageReceivedEvent::class)) {
+            $this->markTestSkipped('This test requires symfony/messenger');
+        }
+
+        /** @var MockObject&Client $client */
+        $client = $this->getMockBuilder(Client::class)
+            ->disableOriginalConstructor()
+            ->disableProxyingToOriginalMethods()
+            ->getMock();
+
+        $client->expects($this->once())->method('clearBreadcrumbs');
+
+        $listener = new BugsnagListener($client, new SymfonyResolver(), true);
+
+        $message = new stdClass();
+        $envelope = new Envelope($message);
+
+        $event = new WorkerMessageReceivedEvent($envelope, 'name');
+
+        $listener->onWorkerMessageReceived($event);
+    }
+
+    public function testBreadcrumbsDoNotLeakBetweenWorkerMessages()
+    {
+        if (!class_exists(WorkerMessageReceivedEvent::class)) {
+            $this->markTestSkipped('This test requires symfony/messenger');
+        }
+
+        $client = new Client(new Configuration('api key'));
+
+        $reports = [];
+        $client->registerCallback(function (Report $report) use (&$reports) {
+            $reports[] = $report->toArray();
+
+            // returning false prevents the report from being sent
+            return false;
+        });
+
+        $dispatcher = new EventDispatcher();
+        $dispatcher->addSubscriber(new BugsnagListener($client, new SymfonyResolver(), true));
+
+        $envelope = new Envelope(new stdClass());
+
+        $dispatcher->dispatch(new WorkerMessageReceivedEvent($envelope, 'async'));
+        $client->leaveBreadcrumb('first message');
+        $dispatcher->dispatch(new WorkerMessageFailedEvent($envelope, 'async', new RuntimeException('first failure')));
+
+        $dispatcher->dispatch(new WorkerMessageReceivedEvent($envelope, 'async'));
+        $client->leaveBreadcrumb('second message');
+        $dispatcher->dispatch(new WorkerMessageFailedEvent($envelope, 'async', new RuntimeException('second failure')));
+
+        $this->assertCount(2, $reports);
+        $this->assertSame(['first message'], array_column($reports[0]['breadcrumbs'], 'name'));
+        $this->assertSame(['second message'], array_column($reports[1]['breadcrumbs'], 'name'));
     }
 }
